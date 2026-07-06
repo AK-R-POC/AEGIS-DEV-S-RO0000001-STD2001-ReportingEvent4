@@ -120,12 +120,15 @@ jobs:
             exit 1
           fi
           echo "Verifying Molecule: $PROPS_MOLECULE"
-          if [[ ! "$REST_OF_NAME" == "$PROPS_MOLECULE-"* ]]; then
+          if [[ "$REST_OF_NAME" == "$PROPS_MOLECULE" || "$REST_OF_NAME" == "$PROPS_MOLECULE-"* ]]; then
+            # Molecule部分を削除（後続が無い場合は空文字になる）
+            REST_OF_NAME="${REST_OF_NAME#"$PROPS_MOLECULE"}"
+            # 先頭の区切りハイフンのみ除去
+            REST_OF_NAME="${REST_OF_NAME#-}"
+          else
             echo "Error: Repository name part does not match the 'Molecule' property ('$PROPS_MOLECULE')."
             exit 1
           fi
-          # Molecule部分を削除
-          REST_OF_NAME="${REST_OF_NAME#"$PROPS_MOLECULE-"}"
           echo "Remaining string after stripping molecule: $REST_OF_NAME"
 
           # 2. StudyNoの検証 (Sのみ)
@@ -136,12 +139,15 @@ jobs:
               exit 1
             fi
             echo "Verifying StudyNo: $PROPS_STUDY_NO"
-            if [[ ! "$REST_OF_NAME" == "$PROPS_STUDY_NO-"* ]]; then
+            if [[ "$REST_OF_NAME" == "$PROPS_STUDY_NO" || "$REST_OF_NAME" == "$PROPS_STUDY_NO-"* ]]; then
+              # StudyNo部分を削除（後続が無い場合は空文字になる）
+              REST_OF_NAME="${REST_OF_NAME#"$PROPS_STUDY_NO"}"
+              # 先頭の区切りハイフンのみ除去
+              REST_OF_NAME="${REST_OF_NAME#-}"
+            else
               echo "Error: Repository name part does not match the 'StudyNo' property ('$PROPS_STUDY_NO')."
               exit 1
             fi
-            # StudyNo部分を削除
-            REST_OF_NAME="${REST_OF_NAME#"$PROPS_STUDY_NO-"}"
             echo "Remaining string after stripping study_no: $REST_OF_NAME"
           fi
 

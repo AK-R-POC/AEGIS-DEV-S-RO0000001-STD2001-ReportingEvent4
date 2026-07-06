@@ -14,10 +14,10 @@ fi
 # =======================================================
 echo "🔍 Checking renv.lock..."
 
-# 1. renv.lock がステージングエリアに存在するか確認
-if ! git rev-parse --verify -q :renv.lock > /dev/null; then
-  # ファイルが存在しない場合はチェック対象外として正常終了
-  echo " renv.lock not found in the staging area, skipping check."
+# 1. renv.lock が今回のコミットで追加/更新されているか確認
+if ! git diff --cached --name-only --diff-filter=ACMR -- renv.lock | grep -qx 'renv.lock'; then
+  # ファイルが存在しない/変更がない/削除された場合はチェック対象外として正常終了
+  echo " renv.lock not added or modified in this commit, skipping check."
   exit 0
 fi
 
@@ -58,25 +58,69 @@ if [ $EXIT_CODE -ne 0 ]; then
   exit 1
 fi
 
-# 4. Packages セクション内に Source が "Local" のパッケージが含まれていないか確認 (awk を使用)
-LOCAL_PKG_ERROR=$(echo "$LOCK_CONTENT" | awk '
-# "Packages" ブロックの開始を検出したら、フラグを立てる
-/"Packages": \{/ {
-  in_packages = 1;
-  next; # この行のチェックは不要なので次に進む
-}
+# 4. Packages セクション内の各パッケージを検証
 
-# フラグが立っている場合、"Source": "Local" を探す
-in_packages && /"Source"[[:space:]]*:[[:space:]]*"Local"/ {
-  print "❌ A package with Source '\''Local'\'' exists in the '\''Packages'\'' section.";
-  exit 1; # 見つけたら即座にエラーで終了
-}
-')
-EXIT_CODE=$?
+# jq が利用可能かチェック（未インストールの場合はスキップ）
+if ! command -v jq >/dev/null 2>&1; then
+  echo "⚠️  jq not found. Skipping package validation."
+  echo "✔ Check complete"
+  exit 0
+fi
 
-# awk がエラーで終了した場合
-if [ $EXIT_CODE -ne 0 ]; then
-  echo "$LOCAL_PKG_ERROR"
+# パッケージが存在しない場合はスキップ
+PKG_COUNT=$(echo "$LOCK_CONTENT" | jq '.Packages // {} | length' 2>/dev/null)
+if [ "$PKG_COUNT" -eq 0 ]; then
+  echo "✔ Check complete"
+  exit 0
+fi
+
+# 許可されたリポジトリ名一覧を取得
+ALLOWED_REPO_NAMES_JSON=$(echo "$LOCK_CONTENT" | jq -c '[.R.Repositories[].Name]' 2>/dev/null)
+
+# チェック除外対象パッケージ
+EXCLUDE_PACKAGES='["renv"]'
+
+HAS_ERROR=0
+
+# 4-a. Source が "Repository" 以外のパッケージを検出
+NON_REPO_PACKAGES=$(echo "$LOCK_CONTENT" | jq -r '
+  [.Packages // {} | to_entries[] |
+    select(.value.Source != "Repository") |
+    "\(.key) (Source: \(.value.Source // "N/A"))"
+  ] | join("\n")' 2>/dev/null)
+
+if [ -n "$NON_REPO_PACKAGES" ]; then
+  echo "❌ The following packages have invalid Source:"
+  echo "$NON_REPO_PACKAGES" | while IFS= read -r line; do
+    echo "   - $line"
+  done
+  HAS_ERROR=1
+fi
+
+# 4-b. Repository フィールドが許可済み Name に含まれないパッケージを検出
+INVALID_REPO_PACKAGES=$(echo "$LOCK_CONTENT" | jq -r --arg prefix "$ALLOWED_URL_PREFIX" --argjson allowed "$ALLOWED_REPO_NAMES_JSON" --argjson exclude "$EXCLUDE_PACKAGES" '
+  [.Packages // {} | to_entries[] |
+    select(.key | IN($exclude[]) | not) |
+    select(.value.Source == "Repository") |
+    select(
+      (.value.Repository == null) or
+      (
+        (.value.Repository | IN($allowed[]) | not) and
+        (.value.Repository | startswith($prefix) | not)
+      )
+    ) |
+    "\(.key) (Repository: \(.value.Repository // "N/A"))"
+  ] | join("\n")' 2>/dev/null)
+
+if [ -n "$INVALID_REPO_PACKAGES" ]; then
+  echo "❌ The following packages are not from allowed repositories:"
+  echo "$INVALID_REPO_PACKAGES" | while IFS= read -r line; do
+    echo "   - $line"
+  done
+  HAS_ERROR=1
+fi
+
+if [ "$HAS_ERROR" -ne 0 ]; then
   exit 1
 fi
 

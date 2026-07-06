@@ -75,26 +75,91 @@ jobs:
           # jq -r で生文字列として取得
           URLS=$(jq -r '.R.Repositories[].URL' renv.lock)
 
-          for URL in $URLS; do
+          while IFS= read -r URL; do
             if [[ "$URL" != "$ALLOWED_PREFIX"* ]]; then
               echo "::error::Invalid repository URL detected: $URL"
               echo "::error::URL must start with $ALLOWED_PREFIX"
               exit 1
             fi
             echo "URL check OK: $URL"
-          done
+          done <<< "$URLS"
 
           echo "✅ All URLs are valid."
 
           # ---------------------------------------------------
-          # 5. Packages セクション内に Source が "Local" のパッケージが
-          #    含まれていないか確認（ローカルパッケージは許可しない）
+          # 5. Packages セクション内の各パッケージを検証
+          #    以下をすべてエラーとする:
+          #    a) Source が "Repository" 以外（GitHub, Local 等）
+          #    b) Repository フィールドが存在しない
+          #    c) Repository の値が Repositories の Name に存在しない
           # ---------------------------------------------------
-          LOCAL_PACKAGES=$(jq -r '[.Packages // {} | to_entries[] | select(.value.Source == "Local") | .key] | join(", ")' renv.lock)
+          # 許可されたリポジトリ名一覧を取得
+          ALLOWED_REPO_NAMES_JSON=$(jq -c '[.R.Repositories[].Name]' renv.lock)
 
-          if [ -n "$LOCAL_PACKAGES" ]; then
-            echo "::error::Packages with Source 'Local' found in 'Packages' section: $LOCAL_PACKAGES"
+          echo "📋 Allowed repository names: $ALLOWED_REPO_NAMES_JSON"
+
+          # パッケージが存在しない場合はスキップ
+          PKG_COUNT=$(jq '.Packages // {} | length' renv.lock)
+          if [ "$PKG_COUNT" -eq 0 ]; then
+            echo "✅ No packages to validate."
+            exit 0
+          fi
+
+          echo "🔍 Validating $PKG_COUNT packages..."
+
+          # チェック除外対象パッケージ
+          EXCLUDE_PACKAGES='["renv"]'
+
+          HAS_ERROR=0
+
+          # ---------------------------------------------------
+          # 5-a. Source が "Repository" 以外のパッケージを検出
+          #      （GitHub, Local 等もここで検出）
+          # ---------------------------------------------------
+          NON_REPO_PACKAGES=$(jq -r '
+            [.Packages // {} | to_entries[] |
+              select(.value.Source != "Repository") |
+              "\(.key) (Source: \(.value.Source // "N/A"))"
+            ] | join("\n")' renv.lock)
+
+          if [ -n "$NON_REPO_PACKAGES" ]; then
+            echo "::error::The following packages have invalid Source:"
+            echo "$NON_REPO_PACKAGES" | while IFS= read -r line; do
+              echo "::error::  - $line"
+            done
+            HAS_ERROR=1
+          fi
+
+          # ---------------------------------------------------
+          # 5-b. Repository フィールドが許可済み Name に含まれないパッケージを検出
+          #      （未定義Name、許可外 Name すべてを捕捉）
+          # ---------------------------------------------------
+          INVALID_REPO_PACKAGES=$(jq -r --arg prefix "$ALLOWED_PREFIX" --argjson allowed "$ALLOWED_REPO_NAMES_JSON" --argjson exclude "$EXCLUDE_PACKAGES" '
+            [.Packages // {} | to_entries[] |
+              select(.key | IN($exclude[]) | not) |
+              select(.value.Source == "Repository") |
+              select(
+                (.value.Repository == null) or
+                (
+                  (.value.Repository | IN($allowed[]) | not) and
+                  (.value.Repository | startswith($prefix) | not)
+                )
+              ) |
+              "\(.key) (Repository: \(.value.Repository // "N/A"))"
+            ] | join("\n")' renv.lock)
+
+          if [ -n "$INVALID_REPO_PACKAGES" ]; then
+            echo "::error::The following packages are not from allowed repositories:"
+            echo "$INVALID_REPO_PACKAGES" | while IFS= read -r line; do
+              echo "::error::  - $line"
+            done
+            echo ""
+            echo "::error::Allowed repository names: $ALLOWED_REPO_NAMES_JSON"
+            HAS_ERROR=1
+          fi
+
+          if [ "$HAS_ERROR" -ne 0 ]; then
             exit 1
           fi
 
-          echo "✅ Packages.Source check OK (No local packages)"
+          echo "✅ All packages are installed from allowed repositories."
